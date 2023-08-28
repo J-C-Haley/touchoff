@@ -52,7 +52,7 @@ class touchoff:
         rospy.init_node("touchoff")
         self.touchoff_frame = rospy.get_param("~touchoff_frame", default="touchoff")
         contact_topic = rospy.get_param("~contact_topic", default="/contact")
-        self.velocity_scaling = float(rospy.get_param("~velocity_scaling", default="0.001"))
+        self.velocity_scaling = float(rospy.get_param("~velocity_scaling", default="0.002"))
         self.acceleration_scaling = float(rospy.get_param("~acceleration_scaling", default="0.01"))
         self.debounce = bool(rospy.get_param("~debounce", default="True"))
         self.debounce_count = int(rospy.get_param("~debounce_count", default=3))
@@ -381,7 +381,9 @@ class touchoff:
         '''Set a rotation angle by touching off in axis1 at two points along axis2'''
         spacing = float(spacing)
         # getattr(touch1.position,axis1)
-        axis3 = [axis for axis in ['x','y','z'] if axis not in [axis1,axis2]][0]
+        axis3 = [axis for axis in ['x','y','z'] if axis not in axis1+axis2]
+        # print(axis3)
+        axis3 = axis3[0]
         
         sign1, sign2 = 1.0, 1.0
         if '-' in axis1:
@@ -394,16 +396,16 @@ class touchoff:
             axis2base = axis2[1]
         else:
             axis2base = axis2
-
-        axis3 = [axis for axis in ['x','y','z'] if axis not in [axis1,axis2]][0]
+        # print(f'axis1base: {axis1base}, axis2base: {axis2base}')
 
         # get axes ordered by plane normal to rotation vector
-        if axis3 == 'z':
+        if 'z' in axis3:
             paxis1, paxis2 = 'x', 'y'
-        elif axis3 == 'y':
+        elif 'y' in axis3:
             paxis1, paxis2 = 'z', 'x'
-        elif axis3 == 'x':
+        elif 'x' in axis3:
             paxis1, paxis2 = 'y', 'z'
+        # print(f'paxis1: {paxis1}, paxis2: {paxis2}')
 
         # get current pose
         start_pose = self.move_group.get_current_pose().pose
@@ -454,7 +456,7 @@ class touchoff:
         touchdiff = axis1_offset2 - axis1_offset1
         print(f'difference in {axis1} touchoffs: {touchdiff}')
         # spacingdiff = getattr(rotatedtouch2.position,axis2base) - getattr(rotatedtouch1.position,axis2base)
-        rot = atan(touchdiff/spacing) * -1.0 * mirror
+        rot = atan(touchdiff/spacing) * mirror * -1.0 # Rotation needed to align tool to base
         print(f'rotation, degrees: {degrees(rot)}')
         
         # if rotation > 45 deg, throw a warning
@@ -516,6 +518,29 @@ class touchoff:
         '''Go to touchoff origin and rotation'''
         if self.constrained:
             contacted = self.go(self.corner_pose)
+    
+    def report(self):
+        '''Print out the current base offset'''
+        if not self.constrained:
+            print('error, touchoff not complete, ensure that the tool frame is aligned and all axes have been probed')
+            return
+        quat = self.corner_pose.orientation
+        trans = self.corner_pose.position
+        euler = tfs.euler_from_quaternion(np.array([
+            quat.x,
+            quat.y,
+            quat.z,
+            quat.w,
+        ]))
+        print(f'Base calibration in XYZ ABC, millimeters:')
+        print(f'''
+X: {trans.x*1000.0} mm
+Y: {trans.y*1000.0} mm
+Z: {trans.z*1000.0} mm
+A: {degrees(euler[0])} deg
+B: {degrees(euler[1])} deg
+C: {degrees(euler[2])} deg
+''')
     
     def accept(self,frame_name=None):
         '''Write the touched pose to a roslaunch xml'''
@@ -664,8 +689,8 @@ Quit with ctrl+c or q'''
             touch.angle(resp[1],resp[2])
         elif resp[0] == 'plane' and resp[1] in ['x','-x','y','-y','z','-z']:
             touch.plane(resp[1])
-        # elif resp[0] == 'align': # broken right now
-        #     touch.align()
+        elif resp[0] == 'align':
+            touch.align()
         # macro touchoffs:
         elif resp[0] == 'go_to_corner':
             touch.go_to_corner()
@@ -674,6 +699,8 @@ Quit with ctrl+c or q'''
         # finish:
         elif resp[0] == 'accept':
             touch.accept()
+        elif resp[0] == 'report':
+            touch.report()
         elif resp[0] == 'q':
             break
         elif resp[0] == 'test':
