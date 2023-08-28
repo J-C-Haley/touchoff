@@ -2,19 +2,19 @@
 <arg name="robot_ns"    default="my_robot_ns"/>
 
 <!-- When Arduino is plugged in, it will report if PIN 13 is grounded on the /contact topic (~500+ hz) -->
-<node pkg="rosserial_python" type="serial_node.py" name="serial_node">
+<node pkg="rosserial_python" type="serial_node.py" name="serial_node" output="log">
   <param name="port" value="/dev/ttyACM0"/>
   <!-- <param name="baud" value="115200"/> -->
 </node>
 
 <group ns="$(arg robot_ns)">
-  <node pkg="touchoff" type="touchoff.py" name="touchoff" output="screen">
+  <node pkg="touchoff" type="touchoff.py" name="touchoff" output="screen" required="true">
     <!-- Specify where you want to save your touchoff launch files -->
     <param name="calibration_folder" value="~/.ros/touchoff/"/>
     <!-- Specify tool radius in meters - distance from contact point to TCP -->
-    <param name="tool_radius_x" value="0.0"/>
+    <param name="tool_radius_x" value="0.002"/>
     <param name="tool_radius_y" value="0.002"/>
-    <param name="tool_radius_z" value="0.002"/>
+    <param name="tool_radius_z" value="0.0"/>
     
     <!-- The rest of the defaults should work without modification -->
     <param name="robot_ns" value="$(arg robot_ns)"/>

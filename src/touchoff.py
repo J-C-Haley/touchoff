@@ -60,10 +60,9 @@ class touchoff:
         self.cal_dir = pathlib.Path(os.path.expanduser(rospy.get_param("~calibration_folder", default="~/.ros/touchoff/")))
         self.cal_dir.mkdir(parents=True,exist_ok=True)
 
-        self.tool_radius_x = float(rospy.get_param("~tool_radius_x", default="0.0"))
-
+        self.tool_radius_x = float(rospy.get_param("~tool_radius_x", default="0.002"))
         self.tool_radius_y = float(rospy.get_param("~tool_radius_y", default="0.002"))
-        self.tool_radius_z = float(rospy.get_param("~tool_radius_z", default="0.002"))
+        self.tool_radius_z = float(rospy.get_param("~tool_radius_z", default="0.0"))
 
         self.probe_search_distance = float(rospy.get_param("~probe_search_distance", default=0.01))
 
@@ -74,12 +73,6 @@ class touchoff:
         self.move_group.set_planner_id("RRTConnectkConfigDefault")
         self.move_group.set_num_planning_attempts(20)
         self.move_group.allow_replanning(True)
-        
-        # self.r = Robot(__REQUIRED_API_VERSION__)
-        # print('frame:')
-        # print(self.r.get_planning_frame())
-        # print('current pose:')
-        # print(self.r.get_current_pose(target_link='robot_tcp',base='world'))
 
         display_trajectory_publisher = rospy.Publisher(
             "/move_group/display_planned_path",
@@ -89,13 +82,10 @@ class touchoff:
 
         self.planning_frame = self.move_group.get_planning_frame()
         self.eef_link = self.move_group.get_end_effector_link()
-        # group_names = robot.get_group_names()
-
-        # self.move_group.set_max_velocity_scaling_factor(velocity_scaling)
-        # self.move_group.limit_max_cartesian_link_speed(0.00001)
 
         self.contact = False
         self.realigned = False
+        self.alignment_rotations = {'x':0,'y':0,'z':0}
         rospy.Subscriber(contact_topic,Bool,self.contact_cb,queue_size=50)
 
         robot_ns = rospy.get_param("~robot_ns", default="my_robot_ns")
@@ -179,7 +169,9 @@ class touchoff:
         contacted = self.go(new_pose,vel=vel,stop_on_contact=stop_on_contact)
         return contacted
 
-    def rotate(self,axis,angle_deg,wait=True,vel=0.0005):
+    def rotate(self,axis,angle_deg,vel=None):
+        if vel == None:
+            vel = self.velocity_scaling
         relative_pose = Pose()
         rot = radians(float(angle_deg))
         relative_pose.orientation.w = 1.0
@@ -192,7 +184,7 @@ class touchoff:
 
         start_pose = self.move_group.get_current_pose().pose
         world2current_rotmat = tfs.quaternion_matrix([start_pose.orientation.x,start_pose.orientation.y,start_pose.orientation.z,start_pose.orientation.w])
-        alignrotmat = tfs.euler_matrix(rot,0,0,axes=f's{axis}{paxis1}{paxis2}')
+        alignrotmat = tfs.euler_matrix(rot,0,0,axes=f'r{axis}{paxis1}{paxis2}')
         world2aligned_rotmat = tfs.concatenate_matrices(world2current_rotmat,alignrotmat)
         world2aligned_quat = tfs.quaternion_from_matrix(world2aligned_rotmat)
 
@@ -201,7 +193,7 @@ class touchoff:
         start_pose_rotated.orientation.y = world2aligned_quat[1]
         start_pose_rotated.orientation.z = world2aligned_quat[2] 
         start_pose_rotated.orientation.w = world2aligned_quat[3]
-        self.go(start_pose_rotated,wait=wait,vel=float(vel))
+        self.go(start_pose_rotated,vel=float(vel))
             
     def axis(self, axis, search_dist=None):
         '''Search along axis (x,-x,y,-y,z,-z) for contact
@@ -232,7 +224,7 @@ class touchoff:
             return False
 
         # log position internally
-        touched_pose = self.move_group.get_current_pose().pose
+        touched_pose = copy.deepcopy(self.move_group.get_current_pose().pose)
         self.jog_axis(axis,-0.001,vel=0.0002,stop_on_contact=False)
 
         # calculate touched point in the touchoff_start_pose frame
@@ -249,7 +241,10 @@ class touchoff:
             self.touchoff_start_pose.orientation.z,
             self.touchoff_start_pose.orientation.w,
             ])
-        xyz1_offset_tool = np.matmul(world2tool_rotmat,xyz_offset_world.T).T
+        # NOTE: when transforming points in a frame to another frame, 
+        # you use the INVERSE of the transformation for the coordinate frame. 
+        # Aka, the point doesn't move, the frame moves, so the apparent position of the point moves the other direction
+        xyz1_offset_tool = np.matmul(tfs.inverse_matrix(world2tool_rotmat),xyz_offset_world.T).T
 
         # calculate axis offset from touchoff_start_pose frame to the object edge and store
         if '-' in axis:
@@ -281,7 +276,7 @@ class touchoff:
             self.z_offest_tool,
             1.0,
         ])
-        xyz1_corner_world = tfs.concatenate_matrices(tool2world_rotmat,xyz1_corner)
+        xyz1_corner_world = tfs.concatenate_matrices(tfs.inverse_matrix(tool2world_rotmat),xyz1_corner)
         self.corner_pose = copy.deepcopy(self.touchoff_start_pose)
         self.corner_pose.position.x = self.touchoff_start_pose.position.x + xyz1_corner_world[0]
         self.corner_pose.position.y = self.touchoff_start_pose.position.y + xyz1_corner_world[1]
@@ -296,7 +291,7 @@ class touchoff:
             ('z' in axis) * sign * self.tool_radius_z,
             1.0,
         ])
-        offset_world = np.matmul(tool2world_rotmat,offset_tool.T).T
+        offset_world = np.matmul(tfs.inverse_matrix(tool2world_rotmat),offset_tool.T).T
         touch_point_pose.position.x += offset_world[0]
         touch_point_pose.position.y += offset_world[1]
         touch_point_pose.position.z += offset_world[2]
@@ -387,46 +382,18 @@ class touchoff:
         spacing = float(spacing)
         # getattr(touch1.position,axis1)
         axis3 = [axis for axis in ['x','y','z'] if axis not in [axis1,axis2]][0]
-
-        # get current pose
-        start_pose = self.move_group.get_current_pose().pose
-
-        # touchoff at current position
-        constrained, corner_pose, touch1 = self.axis(axis1)
-        self.go(start_pose)
-
-        # move to second point and touchoff
-        self.jog_axis(axis2,distance=spacing)
-        start_pose_2 = self.move_group.get_current_pose().pose
-        constrained, corner_pose, touch2 = self.axis(axis1)
-        self.go(start_pose_2)
-        self.go(start_pose)       
-
-        # Rotate touched poses into tool frame
-
-        rotatedtouch1, rotatedtouch2 = Pose(), Pose()
-        rotatedtouch1.orientation.w = 1.0
-        rotatedtouch2.orientation.w = 1.0
-        touch1xyz = np.array([touch1.position.x,touch1.position.y,touch1.position.z,1.0])
-        touch2xyz = np.array([touch2.position.x,touch2.position.y,touch2.position.z,1.0])
-        rotmat = tfs.quaternion_matrix([touch1.orientation.x,touch1.orientation.y,touch1.orientation.z,touch1.orientation.w])
-        touch1rotxyz = np.matmul(rotmat,touch1xyz.T).T
-        touch2rotxyz = np.matmul(rotmat,touch2xyz.T).T
-        rotatedtouch1.position.x = touch1rotxyz[0]
-        rotatedtouch1.position.y = touch1rotxyz[1] 
-        rotatedtouch1.position.z = touch1rotxyz[2]
-        rotatedtouch2.position.x = touch2rotxyz[0]
-        rotatedtouch2.position.y = touch2rotxyz[1] 
-        rotatedtouch2.position.z = touch2rotxyz[2]
-
-        # calculate angle difference
+        
         sign1, sign2 = 1.0, 1.0
         if '-' in axis1:
             sign1 = -1.0
-            axis1 = axis1[1]
+            axis1base = axis1[1]
+        else:
+            axis1base = axis1
         if '-' in axis2:
             sign2 = -1.0
-            axis2 = axis2[1]
+            axis2base = axis2[1]
+        else:
+            axis2base = axis2
 
         axis3 = [axis for axis in ['x','y','z'] if axis not in [axis1,axis2]][0]
 
@@ -438,31 +405,73 @@ class touchoff:
         elif axis3 == 'x':
             paxis1, paxis2 = 'y', 'z'
 
+        # get current pose
+        start_pose = self.move_group.get_current_pose().pose
+
+        # touchoff at current position
+        constrained, corner_pose, touch1 = self.axis(axis1)
+        self.go(start_pose)
+        axis1_offset1 = getattr(self,axis1base+'_offest_tool')
+        axis2_offset1 = getattr(self,axis2base+'_offest_tool')
+
+        # move to second point and touchoff
+        self.jog_axis(axis2,distance=spacing)
+        start_pose_2 = self.move_group.get_current_pose().pose
+        constrained, corner_pose, touch2 = self.axis(axis1)
+        axis1_offset2 = getattr(self,axis1base+'_offest_tool')
+        axis2_offset2 = getattr(self,axis2base+'_offest_tool')
+        self.go(start_pose_2)
+        self.go(start_pose)       
+
+        # Rotate touched poses into tool frame
+
+        # rotatedtouch1, rotatedtouch2 = Pose(), Pose()
+        # rotatedtouch1.orientation.w = 1.0
+        # rotatedtouch2.orientation.w = 1.0
+        # touch1xyz = np.array([touch1.position.x,touch1.position.y,touch1.position.z,1.0])
+        # touch2xyz = np.array([touch2.position.x,touch2.position.y,touch2.position.z,1.0])
+        # rotmat = tfs.quaternion_matrix([touch1.orientation.x,touch1.orientation.y,touch1.orientation.z,touch1.orientation.w])
+        # touch1rotxyz = np.matmul(rotmat,touch1xyz.T).T
+        # touch2rotxyz = np.matmul(rotmat,touch2xyz.T).T
+        # rotatedtouch1.position.x = touch1rotxyz[0]
+        # rotatedtouch1.position.y = touch1rotxyz[1] 
+        # rotatedtouch1.position.z = touch1rotxyz[2]
+        # rotatedtouch2.position.x = touch2rotxyz[0]
+        # rotatedtouch2.position.y = touch2rotxyz[1] 
+        # rotatedtouch2.position.z = touch2rotxyz[2]
+
+        # calculate angle difference
+
+
         # Flip rotation direction if axes left handed
-        if paxis1 + paxis2 == axis1 + axis2:
+        if paxis1 + paxis2 == axis1base + axis2base:
             mirror = 1.0
         else:
             mirror = -1.0
 
         # calculate angle difference
-        touchdiff = getattr(rotatedtouch2.position,axis1) - getattr(rotatedtouch1.position,axis1)
+        # touchdiff = getattr(rotatedtouch2.position,axis1base) - getattr(rotatedtouch1.position,axis1base)
+        touchdiff = axis1_offset2 - axis1_offset1
         print(f'difference in {axis1} touchoffs: {touchdiff}')
-        spacingdiff = getattr(rotatedtouch2.position,axis2) - getattr(rotatedtouch1.position,axis2)
-        rot = atan(touchdiff/spacingdiff) * -1.0 * mirror
+        # spacingdiff = getattr(rotatedtouch2.position,axis2base) - getattr(rotatedtouch1.position,axis2base)
+        rot = atan(touchdiff/spacing) * -1.0 * mirror
         print(f'rotation, degrees: {degrees(rot)}')
         
         # if rotation > 45 deg, throw a warning
-        if abs(degrees(rot)) > 45.0:
-            print("WARNING, rotation over 45degrees detected, exiting angle touchoff")
+        if abs(degrees(rot)) > 15.0:
+            print("WARNING, rotation over 15 degrees detected, aborting angle touchoff")
             return
+        
+        self.alignment_rotations[axis3] = rot
 
         # Find new aligned pose with world->tool + align rotation
         # print('rotmat')
         # print(rotmat)
-        alignrotmat = tfs.euler_matrix(rot,0,0,axes=f's{axis3}{paxis1}{paxis2}')
+        world2current_rotmat = tfs.quaternion_matrix([start_pose.orientation.x,start_pose.orientation.y,start_pose.orientation.z,start_pose.orientation.w])
+        alignrotmat = tfs.euler_matrix(rot,0,0,axes=f'r{axis3}{paxis1}{paxis2}')
         # print('alignrotmat')
         # print(alignrotmat)
-        world2aligned_rotmat = tfs.concatenate_matrices(rotmat,alignrotmat)
+        world2aligned_rotmat = tfs.concatenate_matrices(world2current_rotmat,alignrotmat)
         # print('world2aligned_rotmat')
         # print(world2aligned_rotmat)
         world2aligned_quat = tfs.quaternion_from_matrix(world2aligned_rotmat)
@@ -475,13 +484,15 @@ class touchoff:
         start_pose_rotated.orientation.z = world2aligned_quat[2] 
         start_pose_rotated.orientation.w = world2aligned_quat[3]
 
-        self.aligned_orientation = start_pose_rotated.orientation
-        self.realigned = True
+        self.aligned_orientation = start_pose_rotated.orientation            
 
-        print('old pose:')
-        print(start_pose)
-        print('new pose:')
-        print(start_pose_rotated)
+        # print('old pose:')
+        # print(start_pose)
+        # print('new pose:')
+        # print(start_pose_rotated)
+        
+        self.realigned = True
+        return rot
 
     def plane(self,axis1):
         '''FUTURE Set a tool rotation by touching off along axis1 at three points on a plane'''
@@ -492,9 +503,13 @@ class touchoff:
         if not hasattr(self,'aligned_orientation'):
             print('moving to alignment requires an angle touchoff first')
             return
-        aligned_pose = self.move_group.get_current_pose().pose
-        aligned_pose.orientation = self.aligned_orientation
-        self.go(aligned_pose)
+        # aligned_pose = copy.deepcopy(self.move_group.get_current_pose().pose)
+        # aligned_pose.orientation = self.aligned_orientation
+        # self.go(aligned_pose)
+        
+        for axis, rot in self.alignment_rotations.items():
+            self.rotate(axis,degrees(rot))
+        
         self.realigned = True
     
     def go_to_corner(self):
@@ -603,6 +618,16 @@ class touchoff:
         pose.orientation.w = quat[3]
         return pose
 
+    def test(self):
+
+        rots = []
+        angles = [0,2,2,2,2,2,2,2,2,2,2]
+        for angle in angles:
+            self.rotate('z',angle)
+            rot = self.angle('-x','-y')
+            rots.append(rot)
+        print(rots)
+
 if __name__ == "__main__":
     touch = touchoff()
     while not rospy.is_shutdown():
@@ -639,8 +664,8 @@ Quit with ctrl+c or q'''
             touch.angle(resp[1],resp[2])
         elif resp[0] == 'plane' and resp[1] in ['x','-x','y','-y','z','-z']:
             touch.plane(resp[1])
-        elif resp[0] == 'align':
-            touch.align()
+        # elif resp[0] == 'align': # broken right now
+        #     touch.align()
         # macro touchoffs:
         elif resp[0] == 'go_to_corner':
             touch.go_to_corner()
@@ -651,5 +676,7 @@ Quit with ctrl+c or q'''
             touch.accept()
         elif resp[0] == 'q':
             break
+        elif resp[0] == 'test':
+            touch.test()
         else:
             print(help)
