@@ -380,9 +380,7 @@ class touchoff:
     def angle(self,axis1,axis2, spacing='0.040'):
         '''Set a rotation angle by touching off in axis1 at two points along axis2'''
         spacing = float(spacing)
-        # getattr(touch1.position,axis1)
         axis3 = [axis for axis in ['x','y','z'] if axis not in axis1+axis2]
-        # print(axis3)
         axis3 = axis3[0]
         
         sign1, sign2 = 1.0, 1.0
@@ -396,7 +394,6 @@ class touchoff:
             axis2base = axis2[1]
         else:
             axis2base = axis2
-        # print(f'axis1base: {axis1base}, axis2base: {axis2base}')
 
         # get axes ordered by plane normal to rotation vector
         if 'z' in axis3:
@@ -405,7 +402,6 @@ class touchoff:
             paxis1, paxis2 = 'z', 'x'
         elif 'x' in axis3:
             paxis1, paxis2 = 'y', 'z'
-        # print(f'paxis1: {paxis1}, paxis2: {paxis2}')
 
         # get current pose
         start_pose = self.move_group.get_current_pose().pose
@@ -425,26 +421,6 @@ class touchoff:
         self.go(start_pose_2)
         self.go(start_pose)       
 
-        # Rotate touched poses into tool frame
-
-        # rotatedtouch1, rotatedtouch2 = Pose(), Pose()
-        # rotatedtouch1.orientation.w = 1.0
-        # rotatedtouch2.orientation.w = 1.0
-        # touch1xyz = np.array([touch1.position.x,touch1.position.y,touch1.position.z,1.0])
-        # touch2xyz = np.array([touch2.position.x,touch2.position.y,touch2.position.z,1.0])
-        # rotmat = tfs.quaternion_matrix([touch1.orientation.x,touch1.orientation.y,touch1.orientation.z,touch1.orientation.w])
-        # touch1rotxyz = np.matmul(rotmat,touch1xyz.T).T
-        # touch2rotxyz = np.matmul(rotmat,touch2xyz.T).T
-        # rotatedtouch1.position.x = touch1rotxyz[0]
-        # rotatedtouch1.position.y = touch1rotxyz[1] 
-        # rotatedtouch1.position.z = touch1rotxyz[2]
-        # rotatedtouch2.position.x = touch2rotxyz[0]
-        # rotatedtouch2.position.y = touch2rotxyz[1] 
-        # rotatedtouch2.position.z = touch2rotxyz[2]
-
-        # calculate angle difference
-
-
         # Flip rotation direction if axes left handed
         if paxis1 + paxis2 == axis1base + axis2base:
             mirror = 1.0
@@ -452,10 +428,8 @@ class touchoff:
             mirror = -1.0
 
         # calculate angle difference
-        # touchdiff = getattr(rotatedtouch2.position,axis1base) - getattr(rotatedtouch1.position,axis1base)
         touchdiff = axis1_offset2 - axis1_offset1
         print(f'difference in {axis1} touchoffs: {touchdiff}')
-        # spacingdiff = getattr(rotatedtouch2.position,axis2base) - getattr(rotatedtouch1.position,axis2base)
         rot = atan(touchdiff/spacing) * mirror * -1.0 # Rotation needed to align tool to base
         print(f'rotation, degrees: {degrees(rot)}')
         
@@ -467,18 +441,10 @@ class touchoff:
         self.alignment_rotations[axis3] = rot
 
         # Find new aligned pose with world->tool + align rotation
-        # print('rotmat')
-        # print(rotmat)
         world2current_rotmat = tfs.quaternion_matrix([start_pose.orientation.x,start_pose.orientation.y,start_pose.orientation.z,start_pose.orientation.w])
         alignrotmat = tfs.euler_matrix(rot,0,0,axes=f'r{axis3}{paxis1}{paxis2}')
-        # print('alignrotmat')
-        # print(alignrotmat)
         world2aligned_rotmat = tfs.concatenate_matrices(world2current_rotmat,alignrotmat)
-        # print('world2aligned_rotmat')
-        # print(world2aligned_rotmat)
         world2aligned_quat = tfs.quaternion_from_matrix(world2aligned_rotmat)
-        # print('world2aligned_quat')
-        # print(world2aligned_quat)
 
         start_pose_rotated = copy.deepcopy(start_pose)
         start_pose_rotated.orientation.x = world2aligned_quat[0]
@@ -487,11 +453,6 @@ class touchoff:
         start_pose_rotated.orientation.w = world2aligned_quat[3]
 
         self.aligned_orientation = start_pose_rotated.orientation            
-
-        # print('old pose:')
-        # print(start_pose)
-        # print('new pose:')
-        # print(start_pose_rotated)
         
         self.realigned = True
         return rot
@@ -667,6 +628,7 @@ angle TOUCHOFF_AXIS TRAVERSE_AXIS [distance_between_points_m] - measure rotation
 (future) plane [x,-x,y,-y,z,-z] [distance_between_points_m] - touch a grid of points to get a plane rotation
 align - after measuring an angle, rotate the toolhead to align with the base
 accept [frame_name] - write a launch.xml file to store touchoff as a static transform
+report - print out touchoff frame transformation from robot base (XYZ ABC)
 
 corner AXIS1 AXIS2 AXIS3 [search_distance] - touch off three axes about an outer-facing corner, see diagram
 (future) edge 
