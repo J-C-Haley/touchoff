@@ -485,8 +485,19 @@ class touchoff:
         if not self.constrained:
             print('error, touchoff not complete, ensure that the tool frame is aligned and all axes have been probed')
             return
-        quat = self.corner_pose.orientation
-        trans = self.corner_pose.position
+        print('WARNING: this assumes the robot is configured in the wall mount mode,')
+        print('and ROS is configured in the floor mount mode')
+        
+        # Kuka uses a rotation -> translation from world to base
+        # Inverting, then reversing the transformation
+        world2corner_rotmat = self.pose2mat(self.corner_pose)
+        floor2wall = tfs.euler_matrix(radians(-90),0,0,axes=f'ryxz')
+        world2cornerrot = tfs.concatenate_matrices(world2corner_rotmat,floor2wall)
+        corner2world_rotmat = tfs.inverse_matrix(world2cornerrot)
+        corner2world_pose = self.mat2pose(corner2world_rotmat)
+
+        quat = corner2world_pose.orientation
+        trans = corner2world_pose.position
         euler = tfs.euler_from_quaternion(np.array([
             quat.x,
             quat.y,
@@ -495,9 +506,9 @@ class touchoff:
         ]))
         print(f'Base calibration in XYZ ABC, millimeters:')
         print(f'''
-X: {trans.x*1000.0} mm
-Y: {trans.y*1000.0} mm
-Z: {trans.z*1000.0} mm
+X: {trans.x*1000.0*-1.0} mm
+Y: {trans.y*1000.0*-1.0} mm
+Z: {trans.z*1000.0*-1.0} mm
 A: {degrees(euler[0])} deg
 B: {degrees(euler[1])} deg
 C: {degrees(euler[2])} deg
@@ -554,7 +565,6 @@ C: {degrees(euler[2])} deg
         
     def watch_status(self,msg):
         '''Callback to monitor movegroup motion'''
-        # self.move_status = msg.status_list[0].status
         self.move_status = []
         for status in msg.status_list:
             self.move_status.append(status.status)
