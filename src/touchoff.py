@@ -91,6 +91,8 @@ class touchoff:
         robot_ns = rospy.get_param("~robot_ns", default="my_robot_ns")
         rospy.Subscriber(f'/{robot_ns}/execute_trajectory/status/',GoalStatusArray,self.watch_status,queue_size=5)
         self.tf_broadcaster = tf2_ros.StaticTransformBroadcaster()
+        self.tfBuffer = tf2_ros.Buffer()
+        self.listener = tf2_ros.TransformListener(self.tfBuffer)
 
         rospy.on_shutdown(self.shutdown)
 
@@ -487,31 +489,51 @@ class touchoff:
             return
         print('WARNING: this assumes the robot is configured in the wall mount mode,')
         print('and ROS is configured in the floor mount mode')
-        
-        # Kuka uses a rotation -> translation from world to base
-        # Inverting, then reversing the transformation
-        world2corner_rotmat = self.pose2mat(self.corner_pose)
-        floor2wall = tfs.euler_matrix(radians(-90),0,0,axes=f'ryxz')
-        world2cornerrot = tfs.concatenate_matrices(world2corner_rotmat,floor2wall)
-        corner2world_rotmat = tfs.inverse_matrix(world2cornerrot)
-        corner2world_pose = self.mat2pose(corner2world_rotmat)
 
-        quat = corner2world_pose.orientation
-        trans = corner2world_pose.position
-        euler = tfs.euler_from_quaternion(np.array([
-            quat.x,
-            quat.y,
-            quat.z,
-            quat.w,
-        ]))
+        # Ros floor config to wall config
+        static_transformStamped = TransformStamped()
+        static_transformStamped.header.stamp = rospy.Time.now()
+        static_transformStamped.header.frame_id = self.planning_frame
+        static_transformStamped.child_frame_id = self.planning_frame+'_wall'
+        static_transformStamped.transform.translation.x = 0.0
+        static_transformStamped.transform.translation.y = 0.0
+        static_transformStamped.transform.translation.z = 0.0
+        floor2wall_quat = tfs.quaternion_from_matrix(tfs.euler_matrix(radians(-90),0,0,axes=f'ryxz'))
+        static_transformStamped.transform.rotation.x = floor2wall_quat[0]
+        static_transformStamped.transform.rotation.y = floor2wall_quat[1]
+        static_transformStamped.transform.rotation.z = floor2wall_quat[2]
+        static_transformStamped.transform.rotation.w = floor2wall_quat[3]
+        self.tf_broadcaster.sendTransform(static_transformStamped)
+        rospy.sleep(1.0)
+        
+        while not rospy.is_shutdown():
+            try:
+                wall2tcp_trans = self.tfBuffer.lookup_transform(self.planning_frame+'_wall',self.touchoff_frame, rospy.Time())
+                break
+            except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
+                print('waiting for transform')
+                rospy.sleep(0.25)
+                continue
+        x = wall2tcp_trans.transform.translation.x
+        y = wall2tcp_trans.transform.translation.y
+        z = wall2tcp_trans.transform.translation.z
+
+
+        wall2tcp_euler = tfs.euler_from_quaternion([
+            wall2tcp_trans.transform.rotation.x,
+            wall2tcp_trans.transform.rotation.y,
+            wall2tcp_trans.transform.rotation.z,
+            wall2tcp_trans.transform.rotation.w,
+        ],axes='szyx')
+
         print(f'Base calibration in XYZ ABC, millimeters:')
         print(f'''
-X: {trans.x*1000.0*-1.0} mm
-Y: {trans.y*1000.0*-1.0} mm
-Z: {trans.z*1000.0*-1.0} mm
-A: {degrees(euler[0])} deg
-B: {degrees(euler[1])} deg
-C: {degrees(euler[2])} deg
+X: {x*1000.0} mm
+Y: {y*1000.0} mm
+Z: {z*1000.0} mm
+A: {degrees(wall2tcp_euler[0])} deg
+B: {degrees(wall2tcp_euler[1])} deg
+C: {degrees(wall2tcp_euler[2])} deg
 ''')
     
     def accept(self,frame_name=None):
